@@ -13,6 +13,8 @@ jobs:
   checkin:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write          # keepalive 步骤要往 main 推空提交
     steps:
       - uses: actions/checkout@v4
 
@@ -28,3 +30,23 @@ jobs:
           COOKIE: ${{ secrets.COOKIE }}
           SCT_KEY: ${{ secrets.SCT_KEY }}
         run: python sign.py
+
+      # GitHub 会把"连续 60 天无仓库活动"的仓库里的 schedule 工作流自动停用
+      # （2026-08-25 就这样断过一次，静默停跑，没有任何运行记录）。
+      # 这里在提交年龄接近阈值时推一个空提交刷新计时器。
+      # 用 GITHUB_TOKEN 推的提交不会再触发工作流，不存在递归。
+      # 即使上面签到失败也要保活，所以是 always()。
+      - name: Keepalive
+        if: always()
+        run: |
+          AGE_DAYS=$(( ( $(date +%s) - $(git log -1 --format=%ct) ) / 86400 ))
+          echo "距上次提交 ${AGE_DAYS} 天"
+          if [ "$AGE_DAYS" -ge 45 ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "chore: keepalive，防止 schedule 被 GitHub 自动停用"
+            git push
+            echo "已推空提交刷新活动计时器"
+          else
+            echo "未到阈值（45 天），跳过"
+          fi
