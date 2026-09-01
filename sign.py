@@ -25,11 +25,24 @@ DS_SALT = "xV8v4Qu54lUKrEYFZkJhB8cuOh9Asafs"  # web 端 DS salt（如失效需�
 
 # 各游戏配置：act_id 见各自签到页 URL，signgame 是 luna 接口区分游戏的标识
 # 原神 act_id 已实测；星铁/绝区零为通行值，若你玩且报错把签到页 URL 里的 act_id 发我更新
+#
+# enabled: 该游戏的总开关。False = 完全跳过，连接口都不请求。
+#   要开/关某个游戏，只改这一列，别处都不用动。
+#   关掉的游戏会在日志和通知里明写"已关闭"，不做静默跳过 ——
+#   否则哪天手滑关错了，只会看到"没签到"却找不到原因。
 GAMES = [
-    {"name": "原神",   "biz": "hk4e_cn",  "act_id": "e202311201442471", "signgame": "hk4e"},
-    {"name": "星铁",   "biz": "hkrpg_cn", "act_id": "e202304121516551", "signgame": "hkrpg"},
-    {"name": "绝区零", "biz": "nap_cn",   "act_id": "e202406242138391", "signgame": "zzz"},
+    {"name": "原神",   "biz": "hk4e_cn",  "act_id": "e202311201442471", "signgame": "hk4e",  "enabled": True},
+    {"name": "星铁",   "biz": "hkrpg_cn", "act_id": "e202304121516551", "signgame": "hkrpg", "enabled": False},
+    {"name": "绝区零", "biz": "nap_cn",   "act_id": "e202406242138391", "signgame": "zzz",   "enabled": False},
 ]
+
+
+def enabled_games() -> list:
+    return [g for g in GAMES if g.get("enabled", True)]
+
+
+def disabled_games() -> list:
+    return [g for g in GAMES if not g.get("enabled", True)]
 
 ROLE_URL = "https://api-takumi.mihoyo.com/binding/api/getUserGameRolesByCookie"
 INFO_URL = "https://api-takumi.mihoyo.com/event/luna/info"
@@ -121,7 +134,8 @@ def sign_one_role(cookie: str, game: dict, role: dict) -> str:
 def run_account(cookie: str, idx: int) -> str:
     head = f"【账号{idx}】"
     lines = []
-    for game in GAMES:
+    games = enabled_games()
+    for game in games:
         try:
             roles = get_roles(cookie, game)
         except SignError as e:
@@ -136,7 +150,12 @@ def run_account(cookie: str, idx: int) -> str:
             lines.append(sign_one_role(cookie, game, role))
             time.sleep(random.uniform(1, 3))
     if not lines:
-        lines.append("⚠️ 未找到任何游戏角色，请检查 Cookie 是否有效/为国服账号")
+        if not games:
+            lines.append("⚠️ GAMES 里没有任何启用的游戏，请检查 enabled 配置")
+        else:
+            names = "/".join(g["name"] for g in games)
+            lines.append(f"⚠️ 在已启用的游戏({names})里未找到角色，"
+                         f"请检查 Cookie 是否有效/为国服账号")
     return head + "\n" + "\n".join(lines)
 
 
@@ -183,6 +202,10 @@ def main():
         raise SystemExit(1)
 
     cookies = [c.strip() for c in raw.replace("\n", "#").split("#") if c.strip()]
+    on_names = "/".join(g["name"] for g in enabled_games()) or "(无)"
+    off_names = "/".join(g["name"] for g in disabled_games())
+    print(f"启用: {on_names}" + (f"   已关闭: {off_names}" if off_names else ""))
+
     results = []
     for i, ck in enumerate(cookies, 1):
         res = run_account(ck, i)
@@ -191,8 +214,14 @@ def main():
         time.sleep(random.uniform(2, 5))  # 账号间随机间隔，降低风控
 
     summary = "\n\n".join(results)
+    # 先定 status 再拼附注，保证附注文本永远不会污染成败判定
     status = status_emoji(summary)
-    pushed = notify(f"{status} 米哈游签到结果", summary)
+
+    body = summary
+    off = disabled_games()
+    if off:
+        body += "\n\n（已关闭：" + "/".join(g["name"] for g in off) + "）"
+    pushed = notify(f"{status} 米哈游签到结果", body)
 
     # 失败时必须让 Actions 变红，换来一封 GitHub 失败邮件。
     # 否则 Server酱 一旦失效，"其实一个都没签上"会被绿勾完全掩盖 —— 2026-09-01

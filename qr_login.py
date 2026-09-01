@@ -5,12 +5,17 @@
 
 用法：
   pip install requests qrcode pillow
-  python qr_login.py
+
+  python qr_login.py                # 打印 Cookie，自己复制粘贴
+  python qr_login.py --set-secret   # 扫完直接写进 GitHub 的 COOKIE Secret（推荐）
 
 流程：运行后弹出二维码 → 用【米游社 App】扫一扫 → 手机上确认登录
-      → 脚本自动取出 Cookie 并打印 → 复制粘贴到 GitHub 的 COOKIE Secret。
+      → 脚本取出 Cookie → 打印，或直接写进 Secret。
 
-⚠️ 输出的 Cookie = 账号钥匙，只填进 GitHub Secrets，别发任何人。
+--set-secret 走 gh CLI 的 stdin 传值，Cookie 不显示在屏幕上、
+不进剪贴板、也不会出现在进程命令行里（--body 会，所以没用它）。
+
+⚠️ Cookie = 账号钥匙，只填进 GitHub Secrets，别发任何人。
 """
 
 import time
@@ -21,8 +26,14 @@ import string
 import hashlib
 import os
 import sys
+import shutil
+import argparse
+import subprocess
 
 import requests
+
+DEFAULT_REPO = "PTAbabybearR/MihoyoDailyCheckin"
+ARGS = None  # argparse 结果，output() 要用
 
 SALT = "JwYDpKvLj6MrMqqYU6jTKF17KNO2PXoS"  # passport web DS 盐（失效时更新）
 APP_ID = "bll8iq97cem8"                     # 米游社 bbs
@@ -125,7 +136,51 @@ def get_ltoken(stoken, aid, mid):
     return None
 
 
+def set_secret(cookie_str: str, repo: str) -> bool:
+    """把 Cookie 写进仓库的 COOKIE Secret。
+
+    值走 stdin 而不是 --body，这样它不会出现在进程命令行里
+    （命令行同机器上别的进程可见，也可能落进 shell 历史）。
+    """
+    exe = shutil.which("gh")
+    if not exe:
+        print("✗ 找不到 gh 命令：GitHub CLI 没装或不在 PATH")
+        return False
+
+    r = subprocess.run([exe, "auth", "status"],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if r.returncode != 0:
+        print("✗ gh 未登录，先跑一次：gh auth login")
+        return False
+
+    r = subprocess.run([exe, "secret", "set", "COOKIE", "--repo", repo],
+                       input=cookie_str.encode("utf-8"),
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if r.returncode != 0:
+        err = (r.stderr or b"").decode("utf-8", "replace").strip()
+        print(f"✗ 写入 Secret 失败: {err}")
+        return False
+
+    print(f"\n✅ 已写入 {repo} 的 COOKIE Secret，值全程没有显示在屏幕上。")
+    print("   下一步：去 Actions 手动触发一次，或等下一个定时点。")
+    return True
+
+
 def output(cookie_str: str):
+    if ARGS is not None and ARGS.set_secret:
+        if set_secret(cookie_str, ARGS.repo):
+            return
+        # 自动写入失败时不能默默把 Cookie 甩到屏幕上 —— 用户选的是"别落屏"，
+        # 得他自己点头才降级。
+        print("\n自动写入没成功。")
+        try:
+            ans = input("要改为把 Cookie 打印到屏幕、你自己复制吗？(y/N) ").strip().lower()
+        except EOFError:
+            ans = "n"
+        if ans != "y":
+            print("已放弃打印。修好 gh 后重跑本脚本即可。")
+            sys.exit(1)
+
     print("\n========== 复制下面这一整行 → 粘贴到 GitHub 的 COOKIE Secret ==========\n")
     print(cookie_str)
     print("\n========== 复制到上面这行结束 ==========")
@@ -133,6 +188,14 @@ def output(cookie_str: str):
 
 
 def main():
+    global ARGS
+    ap = argparse.ArgumentParser(description="扫码登录获取米游社 Cookie")
+    ap.add_argument("--set-secret", action="store_true",
+                    help="扫码后直接写进 GitHub 的 COOKIE Secret，不打印到屏幕")
+    ap.add_argument("--repo", default=DEFAULT_REPO,
+                    help=f"目标仓库，默认 {DEFAULT_REPO}")
+    ARGS = ap.parse_args()
+
     url, ticket = create_qr()
     show_qr(url)
     data = poll(ticket)
