@@ -149,19 +149,31 @@ def status_emoji(text: str) -> str:
     return "✅"
 
 
-def notify(title: str, content: str):
+def notify(title: str, content: str) -> bool:
+    """推送 Server酱 通知。返回是否确实推送成功。
+
+    注意 requests 不抛异常 ≠ 推送成功：SCT_KEY 失效/额度用尽时
+    Server酱 照样返回 HTTP 200，只是 body 里 code != 0。
+    只看异常会在"通知根本没发出去"时打印"已推送"，把故障藏起来。
+    """
     key = os.environ.get("SCT_KEY", "").strip()
     if not key:
-        return
+        return True  # 有意不配通知，不算失败
     try:
-        requests.post(
+        resp = requests.post(
             f"https://sctapi.ftqq.com/{key}.send",
             data={"title": title, "desp": content},
             timeout=20,
         )
+        body = resp.json()
+        if body.get("code") != 0:
+            print(f"通知推送被拒: {body.get('message')} (code={body.get('code')})")
+            return False
         print("已推送 Server酱 通知")
+        return True
     except Exception as e:  # noqa: BLE001
         print(f"通知推送失败: {e}")
+        return False
 
 
 def main():
@@ -179,7 +191,19 @@ def main():
         time.sleep(random.uniform(2, 5))  # 账号间随机间隔，降低风控
 
     summary = "\n\n".join(results)
-    notify(f"{status_emoji(summary)} 米哈游签到结果", summary)
+    status = status_emoji(summary)
+    pushed = notify(f"{status} 米哈游签到结果", summary)
+
+    # 失败时必须让 Actions 变红，换来一封 GitHub 失败邮件。
+    # 否则 Server酱 一旦失效，"其实一个都没签上"会被绿勾完全掩盖 —— 2026-09-01
+    # 就是这样：工作流被停用一周，唯一的感知渠道只剩通知，而通知也没了。
+    # 判定复用 status_emoji，和通知标题共用一套标准，避免两处漂移：
+    #   ✅ 全部成功或今天已签过 / ➖ 已签过 → 正常
+    #   ❌ 签到失败 / ⚠️ 验证码拦截、没找到角色 → 都要人工介入
+    if status != "✅":
+        raise SystemExit(1)
+    if not pushed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
