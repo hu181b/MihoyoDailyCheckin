@@ -32,7 +32,7 @@ import subprocess
 
 import requests
 
-DEFAULT_REPO = "PTAbabybearR/MihoyoDailyCheckin"
+DEFAULT_REPO = "hu181b/MihoyoDailyCheckin"
 ARGS = None  # argparse 结果，output() 要用
 
 SALT = "JwYDpKvLj6MrMqqYU6jTKF17KNO2PXoS"  # passport web DS 盐（失效时更新）
