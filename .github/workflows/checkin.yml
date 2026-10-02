@@ -29,6 +29,8 @@ jobs:
         env:
           COOKIE: ${{ secrets.COOKIE }}
           SCT_KEY: ${{ secrets.SCT_KEY }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: python sign.py
 
       # GitHub 会把"连续 60 天无仓库活动"的仓库里的 schedule 工作流自动停用
