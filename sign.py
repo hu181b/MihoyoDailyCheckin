@@ -4,10 +4,11 @@
 米哈游 国服米游社 自动签到（原神 / 星铁 / 绝区零）
 - 多账号：COOKIE 用 # 或换行分隔
 - 多游戏：自动跳过没有角色的游戏
-- 通知：Server酱 Turbo（SCT_KEY）推送到微信，标题随结果高亮
+- 通知：Telegram Bot 优先，未配置时使用 Server酱
 环境变量：
   COOKIE   必填，米游社 Cookie（多个用 # 分隔）
   SCT_KEY  选填，Server酱 Turbo 的 SENDKEY
+  TG_BOT_TOKEN / TG_CHAT_ID  选填，Telegram Bot 凭证和接收聊天 ID
 """
 
 import os
@@ -168,7 +169,7 @@ def status_emoji(text: str) -> str:
     return "✅"
 
 
-def notify(title: str, content: str) -> bool:
+def notify_serverchan(title: str, content: str) -> bool:
     """推送 Server酱 通知。返回是否确实推送成功。
 
     注意 requests 不抛异常 ≠ 推送成功：SCT_KEY 失效/额度用尽时
@@ -193,6 +194,43 @@ def notify(title: str, content: str) -> bool:
     except Exception as e:  # noqa: BLE001
         print(f"通知推送失败: {e}")
         return False
+
+
+def notify_telegram(title: str, content: str) -> bool:
+    """发送纯文本通知；凭证只从环境变量读取，不输出含 Token 的异常。"""
+    token = os.environ.get("TG_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TG_CHAT_ID", "").strip()
+    if not token or not chat_id:
+        print("Telegram 配置不完整：需要 TG_BOT_TOKEN 和 TG_CHAT_ID")
+        return False
+    text = f"{title}\n\n{content}"
+    # 2000 个 Unicode 字符，即使包含 emoji 也不会超过消息长度限制。
+    for offset in range(0, len(text), 2000):
+        try:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": text[offset:offset + 2000]},
+                timeout=20,
+            )
+            body = resp.json()
+            if resp.status_code != 200 or body.get("ok") is not True:
+                print(f"Telegram 通知失败（HTTP {resp.status_code}，"
+                      f"错误码 {body.get('error_code', '?')}）。"
+                      "请检查 Token、聊天 ID，并先给机器人发送 /start。")
+                return False
+        except Exception as exc:
+            # requests 异常可能包含带 Token 的 URL，不能打印异常正文。
+            print(f"Telegram 通知请求失败：{type(exc).__name__}")
+            return False
+    print("Telegram 通知发送成功")
+    return True
+
+
+def notify(title: str, content: str) -> bool:
+    """已配置 Telegram 时优先使用；否则使用原有 Server酱通知。"""
+    if os.environ.get("TG_BOT_TOKEN", "").strip() or os.environ.get("TG_CHAT_ID", "").strip():
+        return notify_telegram(title, content)
+    return notify_serverchan(title, content)
 
 
 def main():
