@@ -30,7 +30,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Restore notification state
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: .checkin-state
           key: checkin-notify-v1-${{ github.run_id }}-${{ github.run_attempt }}
@@ -46,7 +46,7 @@ jobs:
 
       - name: Save notification state
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: .checkin-state
           key: checkin-notify-v1-${{ github.run_id }}-${{ github.run_attempt }}
