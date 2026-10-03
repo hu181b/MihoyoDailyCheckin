@@ -48,6 +48,7 @@ def disabled_games() -> list:
 ROLE_URL = "https://api-takumi.mihoyo.com/binding/api/getUserGameRolesByCookie"
 INFO_URL = "https://api-takumi.mihoyo.com/event/luna/info"
 SIGN_URL = "https://api-takumi.mihoyo.com/event/luna/sign"
+REWARD_URL = "https://api-takumi.mihoyo.com/event/luna/home"
 
 
 def get_ds() -> str:
@@ -91,6 +92,39 @@ def get_roles(cookie: str, game: dict) -> list:
     return (r.get("data") or {}).get("list") or []
 
 
+def reward_text(game: dict, headers: dict, total) -> str:
+    """按本月累计签到次数查当天那一份奖励，不能按日历日期索引。"""
+    unavailable = "今日签到奖励：暂未查询到（不影响签到结果）"
+    try:
+        if isinstance(total, bool) or not str(total).isdigit():
+            return unavailable
+        index = int(total) - 1
+        if index < 0:
+            return unavailable
+        response = requests.get(
+            REWARD_URL,
+            params={"lang": LANG, "act_id": game["act_id"]},
+            headers=headers, timeout=15,
+        ).json()
+        if response.get("retcode") != 0:
+            return unavailable
+        awards = (response.get("data") or {}).get("awards")
+        if not isinstance(awards, list) or index >= len(awards):
+            return unavailable
+        award = awards[index]
+        if not isinstance(award, dict):
+            return unavailable
+        name, count = award.get("name"), award.get("cnt")
+        if not isinstance(name, str) or not name.strip() or isinstance(count, bool):
+            return unavailable
+        if not str(count).isdigit() or int(count) <= 0:
+            return unavailable
+        return f"今日签到奖励：{name.strip()} ×{int(count)}"
+    except Exception:
+        # 奖励查询失败不能中断签到或输出带敏感请求头的异常。
+        return unavailable
+
+
 def sign_one_role(cookie: str, game: dict, role: dict) -> str:
     """对单个角色签到，返回结果文本。"""
     tag = f"[{game['name']}]"
@@ -111,7 +145,8 @@ def sign_one_role(cookie: str, game: dict, role: dict) -> str:
     data = info.get("data") or {}
     if data.get("is_sign"):
         total = data.get("total_sign_day", "?")
-        return f"➖ {tag} {nickname}({uid}) 今天已签过，本月累计 {total} 天"
+        return (f"➖ {tag} {nickname}({uid}) 今天已签过，本月累计 {total} 天\n"
+                f"{reward_text(game, headers, total)}")
 
     # 执行签到
     resp = requests.post(
@@ -122,11 +157,27 @@ def sign_one_role(cookie: str, game: dict, role: dict) -> str:
     retcode = resp.get("retcode")
     rdata = resp.get("data") or {}
 
-    if retcode == 0 and not rdata.get("risk_code"):
+    if retcode == 0 and not rdata.get("risk_code") and not rdata.get("gt"):
         total = (data.get("total_sign_day") or 0) + 1
-        return f"✅ {tag} {nickname}({uid}) 签到成功，本月累计 {total} 天"
+        return (f"✅ {tag} {nickname}({uid}) 签到成功，本月累计 {total} 天\n"
+                f"{reward_text(game, headers, total)}")
     if retcode == -5003:
-        return f"➖ {tag} {nickname}({uid}) 今天已签过"
+        # 另一处刚完成签到时，再查实际累计次数，避免把上一份奖励当作今日奖励。
+        total = None
+        try:
+            latest = requests.get(
+                INFO_URL,
+                params={"lang": LANG, "act_id": act_id, "region": region, "uid": uid},
+                headers=headers, timeout=15,
+            ).json()
+            latest_data = latest.get("data") or {}
+            if latest.get("retcode") == 0 and latest_data.get("is_sign"):
+                total = latest_data.get("total_sign_day")
+        except Exception:
+            pass
+        days = f"，本月累计 {total} 天" if total is not None else ""
+        return (f"➖ {tag} {nickname}({uid}) 今天已签过{days}\n"
+                f"{reward_text(game, headers, total)}")
     if rdata.get("risk_code") or rdata.get("gt"):
         return f"⚠️ {tag} {nickname}({uid}) 触发验证码(geetest)，被拦截，需人工补签"
     return f"❌ {tag} {nickname}({uid}) 签到失败: {resp.get('message')} (retcode={retcode})"
