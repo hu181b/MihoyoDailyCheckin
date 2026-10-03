@@ -130,36 +130,51 @@ def get_roles(cookie: str, game: dict) -> list:
     return (r.get("data") or {}).get("list") or []
 
 
+def parse_award(award):
+    """验证名称和数量，避免把不完整奖励表当作准确统计。"""
+    if not isinstance(award, dict):
+        raise ValueError("invalid award")
+    name, count = award.get("name"), award.get("cnt")
+    if not isinstance(name, str) or not name.strip() or isinstance(count, bool):
+        raise ValueError("invalid award")
+    if not str(count).isdigit() or int(count) <= 0:
+        raise ValueError("invalid quantity")
+    return name.strip(), int(count)
+
+
 def reward_text(game: dict, headers: dict, total) -> str:
-    """按本月累计签到次数查当天那一份奖励，不能按日历日期索引。"""
-    unavailable = "今日签到奖励：暂未查询到（不影响签到结果）"
+    """按已签到次数汇总本月常规奖励，不依赖本地历史记录。"""
+    month = today()[:7]
+    unavailable = ("今日签到奖励：暂未查询到（不影响签到结果）\n"
+                   f"本月累计签到奖励（{month}）：暂未查询到")
     try:
-        if isinstance(total, bool) or not str(total).isdigit():
+        if isinstance(total, bool) or not str(total).isdigit() or int(total) < 1:
             return unavailable
-        index = int(total) - 1
-        if index < 0:
-            return unavailable
-        response = request_json("GET", 
-            REWARD_URL,
+        days = int(total)
+        response = request_json(
+            "GET", REWARD_URL,
             params={"lang": LANG, "act_id": game["act_id"]},
             headers=headers, timeout=15,
         )
         if response.get("retcode") != 0:
             return unavailable
         awards = (response.get("data") or {}).get("awards")
-        if not isinstance(awards, list) or index >= len(awards):
+        if not isinstance(awards, list) or days > len(awards):
             return unavailable
-        award = awards[index]
-        if not isinstance(award, dict):
-            return unavailable
-        name, count = award.get("name"), award.get("cnt")
-        if not isinstance(name, str) or not name.strip() or isinstance(count, bool):
-            return unavailable
-        if not str(count).isdigit() or int(count) <= 0:
-            return unavailable
-        return f"今日签到奖励：{name.strip()} ×{int(count)}"
+        name, count = parse_award(awards[days - 1])
+        daily = f"今日签到奖励：{name} ×{count}"
+        try:
+            totals = {}
+            for award in awards[:days]:
+                item, quantity = parse_award(award)
+                totals[item] = totals.get(item, 0) + quantity
+            lines = "\n".join(f"· {item} ×{quantity}" for item, quantity in totals.items())
+            return (f"{daily}\n\n本月累计签到奖励（{month}，{days} 天）：\n"
+                    f"{lines}\n（按月度奖励表统计常规签到奖励，不含额外活动奖励）")
+        except ValueError:
+            return f"{daily}\n本月累计签到奖励（{month}）：奖励表不完整，暂无法准确统计"
     except Exception:
-        # 奖励查询失败不能中断签到或输出带敏感请求头的异常。
+        # 统计失败不能中断签到，也不能输出带敏感请求头的异常。
         return unavailable
 
 
@@ -346,7 +361,7 @@ def notify_once(title, content, status):
     path = Path(os.environ.get("NOTIFY_STATE_PATH", ".checkin-state/notification.json"))
     date = today()
     destination = os.environ.get("TG_CHAT_ID", "") + os.environ.get("TG_BOT_TOKEN", "") + os.environ.get("SCT_KEY", "")
-    scope = hashlib.sha256(destination.encode()).hexdigest()
+    scope = hashlib.sha256((destination + "|monthly-rewards-v1").encode()).hexdigest()
     state = {}
     try:
         state = json.loads(path.read_text())
