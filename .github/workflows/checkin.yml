@@ -9,6 +9,10 @@ on:
     - cron: "13 8 * * *"   # UTC 8:13 = 北京 16:13（再兜一次，确保当天不断签）
   workflow_dispatch: {}        # 允许在 Actions 页面手动触发，方便测试
 
+concurrency:
+  group: mihoyo-daily-checkin
+  cancel-in-progress: false
+
 jobs:
   checkin:
     runs-on: ubuntu-latest
@@ -25,6 +29,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Restore notification state
+        uses: actions/cache/restore@v4
+        with:
+          path: .checkin-state
+          key: checkin-notify-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: checkin-notify-v1-
+
       - name: Run check-in
         env:
           COOKIE: ${{ secrets.COOKIE }}
@@ -32,6 +43,13 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: python sign.py
+
+      - name: Save notification state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .checkin-state
+          key: checkin-notify-v1-${{ github.run_id }}-${{ github.run_attempt }}
 
       # GitHub 会把"连续 60 天无仓库活动"的仓库里的 schedule 工作流自动停用
       # （2026-08-25 就这样断过一次，静默停跑，没有任何运行记录）。
@@ -52,3 +70,4 @@ jobs:
           else
             echo "未到阈值（45 天），跳过"
           fi
+
