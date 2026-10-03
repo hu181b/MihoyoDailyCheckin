@@ -16,6 +16,10 @@ import time
 import random
 import string
 import hashlib
+import json
+from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -81,14 +85,48 @@ class SignError(Exception):
     pass
 
 
+class NetworkError(SignError):
+    pass
+
+
+def request_json(method, url, **kwargs):
+    """仅重试临时网络/服务故障；签到 POST 由角色层先核实状态再重试。"""
+    attempts = 3 if method == "GET" else 1
+    for attempt in range(attempts):
+        try:
+            response = requests.request(method, url, **kwargs)
+            if response.status_code == 429 or response.status_code >= 500:
+                raise NetworkError("网络或服务暂时异常")
+            response.raise_for_status()
+            body = response.json()
+            if not isinstance(body, dict):
+                raise ValueError("invalid response")
+            return body
+        except (requests.Timeout, requests.ConnectionError, ValueError, NetworkError):
+            if attempt + 1 == attempts:
+                raise NetworkError("网络超时或服务异常，请等待下一次自动补签") from None
+            print(f"网络请求异常，稍后重试（{attempt + 1}/{attempts - 1}）")
+            time.sleep(3 * (attempt + 1))
+        except requests.RequestException:
+            raise SignError("接口请求被拒绝，请检查服务状态") from None
+
+
+def api_error(response):
+    code = response.get("retcode")
+    message = str(response.get("message") or "未知错误")
+    if code in (10001, -100, -10001) or any(x in message.lower() for x in ("登录", "登陆", "cookie", "login", "login expired")):
+        return "Cookie 已失效或登录状态无效：请重新获取 Cookie，并更新 GitHub Secrets 的 COOKIE"
+    return f"接口返回异常：{message}（错误码 {code}）"
+
+
 def get_roles(cookie: str, game: dict) -> list:
     """获取该 Cookie 下某游戏的角色列表（无角色返回空，不报错）。"""
-    r = requests.get(
+    r = request_json("GET", 
         ROLE_URL, params={"game_biz": game["biz"]},
         headers=build_headers(cookie, game["signgame"]), timeout=20,
-    ).json()
+    )
     if r.get("retcode") != 0:
-        raise SignError(f"获取角色失败: {r.get('message')} (retcode={r.get('retcode')})")
+        raise SignError(api_error(r))
     return (r.get("data") or {}).get("list") or []
 
 
@@ -101,11 +139,11 @@ def reward_text(game: dict, headers: dict, total) -> str:
         index = int(total) - 1
         if index < 0:
             return unavailable
-        response = requests.get(
+        response = request_json("GET", 
             REWARD_URL,
             params={"lang": LANG, "act_id": game["act_id"]},
             headers=headers, timeout=15,
-        ).json()
+        )
         if response.get("retcode") != 0:
             return unavailable
         awards = (response.get("data") or {}).get("awards")
@@ -125,7 +163,7 @@ def reward_text(game: dict, headers: dict, total) -> str:
         return unavailable
 
 
-def sign_one_role(cookie: str, game: dict, role: dict) -> str:
+def _sign_one_role(cookie: str, game: dict, role: dict) -> str:
     """对单个角色签到，返回结果文本。"""
     tag = f"[{game['name']}]"
     region = role["region"]
@@ -135,13 +173,12 @@ def sign_one_role(cookie: str, game: dict, role: dict) -> str:
     headers = build_headers(cookie, game["signgame"])
 
     # 已签天数信息
-    info = requests.get(
+    info = request_json("GET", 
         INFO_URL, params={"lang": LANG, "act_id": act_id, "region": region, "uid": uid},
         headers=headers, timeout=20,
-    ).json()
+    )
     if info.get("retcode") != 0:
-        return (f"❌ {tag} {nickname}({uid}) 查询失败: {info.get('message')} "
-                f"(retcode={info.get('retcode')})")
+        return f"❌ {tag} {nickname}({uid}) {api_error(info)}"
     data = info.get("data") or {}
     if data.get("is_sign"):
         total = data.get("total_sign_day", "?")
@@ -149,11 +186,11 @@ def sign_one_role(cookie: str, game: dict, role: dict) -> str:
                 f"{reward_text(game, headers, total)}")
 
     # 执行签到
-    resp = requests.post(
+    resp = request_json("POST",
         SIGN_URL,
         json={"act_id": act_id, "region": region, "uid": uid, "lang": LANG},
         headers=headers, timeout=20,
-    ).json()
+    )
     retcode = resp.get("retcode")
     rdata = resp.get("data") or {}
 
@@ -165,11 +202,11 @@ def sign_one_role(cookie: str, game: dict, role: dict) -> str:
         # 另一处刚完成签到时，再查实际累计次数，避免把上一份奖励当作今日奖励。
         total = None
         try:
-            latest = requests.get(
+            latest = request_json("GET", 
                 INFO_URL,
                 params={"lang": LANG, "act_id": act_id, "region": region, "uid": uid},
                 headers=headers, timeout=15,
-            ).json()
+            )
             latest_data = latest.get("data") or {}
             if latest.get("retcode") == 0 and latest_data.get("is_sign"):
                 total = latest_data.get("total_sign_day")
@@ -180,7 +217,23 @@ def sign_one_role(cookie: str, game: dict, role: dict) -> str:
                 f"{reward_text(game, headers, total)}")
     if rdata.get("risk_code") or rdata.get("gt"):
         return f"⚠️ {tag} {nickname}({uid}) 触发验证码(geetest)，被拦截，需人工补签"
-    return f"❌ {tag} {nickname}({uid}) 签到失败: {resp.get('message')} (retcode={retcode})"
+    return f"❌ {tag} {nickname}({uid}) 签到失败：{api_error(resp)}"
+
+
+def sign_one_role(cookie: str, game: dict, role: dict) -> str:
+    for attempt in range(3):
+        try:
+            return _sign_one_role(cookie, game, role)
+        except NetworkError:
+            if attempt < 2:
+                print(f"[{game['name']}] 网络异常，重新查询签到状态后补试（{attempt + 1}/2）")
+                time.sleep(5 * (attempt + 1))
+                continue
+            return f"❌ [{game['name']}] {role.get('nickname', '')} 网络异常：自动重试仍失败，等待下一次补签"
+        except SignError as exc:
+            return f"❌ [{game['name']}] {role.get('nickname', '')} {exc}"
+        except Exception:
+            return f"❌ [{game['name']}] 签到响应异常，请查看接口是否变化"
 
 
 def run_account(cookie: str, idx: int) -> str:
@@ -193,8 +246,8 @@ def run_account(cookie: str, idx: int) -> str:
         except SignError as e:
             lines.append(f"❌ [{game['name']}] {e}")
             continue
-        except Exception as e:  # noqa: BLE001
-            lines.append(f"❌ [{game['name']}] 异常: {e}")
+        except Exception:  # 不输出可能带 Cookie 的异常
+            lines.append(f"❌ [{game['name']}] 角色查询响应异常")
             continue
         if not roles:
             continue  # 没这个游戏的角色，静默跳过
@@ -243,7 +296,7 @@ def notify_serverchan(title: str, content: str) -> bool:
         print("已推送 Server酱 通知")
         return True
     except Exception as e:  # noqa: BLE001
-        print(f"通知推送失败: {e}")
+        print(f"通知推送失败：{type(e).__name__}")
         return False
 
 
@@ -284,6 +337,45 @@ def notify(title: str, content: str) -> bool:
     return notify_serverchan(title, content)
 
 
+def today():
+    return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+
+
+def notify_once(title, content, status):
+    """跨 Actions 运行去重；仅保存日期、状态和摘要，不保存账号或凭证。"""
+    path = Path(os.environ.get("NOTIFY_STATE_PATH", ".checkin-state/notification.json"))
+    date = today()
+    destination = os.environ.get("TG_CHAT_ID", "") + os.environ.get("TG_BOT_TOKEN", "") + os.environ.get("SCT_KEY", "")
+    scope = hashlib.sha256(destination.encode()).hexdigest()
+    state = {}
+    try:
+        state = json.loads(path.read_text())
+        if not isinstance(state, dict):
+            state = {}
+    except (OSError, ValueError):
+        pass
+    if state.get("date") != date or state.get("scope") != scope:
+        state = {"date": date, "scope": scope, "success": False, "failures": []}
+    digest = hashlib.sha256(content.encode()).hexdigest()
+    if (status == "✅" and state.get("success")) or (status != "✅" and digest in state.get("failures", [])):
+        print("今日同类通知已发送，跳过重复推送；签到检查仍正常执行")
+        return True
+    if not notify(title, content):
+        return False
+    # 未配置通知时不能登记为已发，以免后续首次配置被跳过。
+    configured = bool(os.environ.get("TG_BOT_TOKEN") or os.environ.get("TG_CHAT_ID") or os.environ.get("SCT_KEY"))
+    if configured:
+        if status == "✅":
+            state["success"] = True
+        else:
+            state.setdefault("failures", []).append(digest)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(state))
+        temporary.replace(path)
+    return True
+
+
 def main():
     raw = os.environ.get("COOKIE", "").strip()
     if not raw:
@@ -306,11 +398,11 @@ def main():
     # 先定 status 再拼附注，保证附注文本永远不会污染成败判定
     status = status_emoji(summary)
 
-    body = summary
+    body = f"签到日期：{today()}（北京时间）\n\n" + summary
     off = disabled_games()
     if off:
         body += "\n\n（已关闭：" + "/".join(g["name"] for g in off) + "）"
-    pushed = notify(f"{status} 米哈游签到结果", body)
+    pushed = notify_once(f"{status} 米哈游签到结果", body, status)
 
     # 失败时必须让 Actions 变红，换来一封 GitHub 失败邮件。
     # 否则 Server酱 一旦失效，"其实一个都没签上"会被绿勾完全掩盖 —— 2026-09-01
@@ -326,3 +418,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
